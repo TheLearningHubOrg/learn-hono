@@ -1,66 +1,54 @@
-import { describe, it } from 'node:test';
-import assert from 'node:assert';
-import { app } from '../src/app.js';
+import { describe, expect, it } from 'vitest';
+import { createApp } from '../src/app.js';
 
-describe('Hono App Endpoints', () => {
-  it('GET / should return service info and 200 OK', async () => {
-    const res = await app.request('/');
-    assert.strictEqual(res.status, 200);
-
-    const body = await res.json() as { name: string; version: string };
-    assert.strictEqual(body.name, 'Learn Hono Edge Web Framework API');
-    assert.strictEqual(body.version, '1.0.0');
+describe('app shell', () => {
+  it('GET / describes the API', async () => {
+    const res = await createApp().request('/');
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ name: 'learn-hono', endpoints: { health: '/health' } });
   });
 
-  it('GET /health should return 200 OK and healthy status', async () => {
-    const res = await app.request('/health');
-    assert.strictEqual(res.status, 200);
-
-    const body = await res.json() as { success: boolean; data: { status: string } };
-    assert.strictEqual(body.success, true);
-    assert.strictEqual(body.data.status, 'healthy');
+  it('GET /health answers ok', async () => {
+    const res = await createApp().request('/health');
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ status: 'ok' });
   });
 
-  it('GET /api/v1/items should return array of items', async () => {
-    const res = await app.request('/api/v1/items');
-    assert.strictEqual(res.status, 200);
-
-    const body = await res.json() as { success: boolean; data: unknown[]; meta: { total: number } };
-    assert.strictEqual(body.success, true);
-    assert.ok(Array.isArray(body.data));
-    assert.ok(body.meta.total >= 2);
+  it('HEAD /health is served by the GET route with no body', async () => {
+    const res = await createApp().request('/health', { method: 'HEAD' });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('');
   });
 
-  it('POST /api/v1/items should validate payload and return 201 Created', async () => {
-    const payload = {
-      title: 'Testing Edge Middleware',
-      description: 'Verifying end-to-end Zod parsing in Hono',
-      status: 'pending'
-    };
+  it('adds a request id and security headers to every response', async () => {
+    const res = await createApp().request('/health');
+    expect(res.headers.get('X-Request-Id')).toMatch(/[0-9a-f-]{36}/);
+    expect(res.headers.get('X-Content-Type-Options')).toBe('nosniff');
+  });
 
-    const res = await app.request('/api/v1/items', {
+  it('keeps a caller-supplied request id', async () => {
+    const res = await createApp().request('/health', { headers: { 'X-Request-Id': 'trace-123' } });
+    expect(res.headers.get('X-Request-Id')).toBe('trace-123');
+  });
+
+  it('unknown routes return the JSON 404 shape', async () => {
+    const res = await createApp().request('/nope');
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: { code: 'NOT_FOUND', message: 'No route for GET /nope' } });
+  });
+
+  it('GET /ui renders HTML and escapes user input', async () => {
+    const app = createApp();
+    await app.request('/api/v1/items', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
+      body: JSON.stringify({ title: '<script>alert(1)</script>' }),
     });
-
-    assert.strictEqual(res.status, 201);
-    const body = await res.json() as { success: boolean; data: { title: string } };
-    assert.strictEqual(body.success, true);
-    assert.strictEqual(body.data.title, payload.title);
-  });
-
-  it('GET /api/v1/items/unknown should return 404 Not Found', async () => {
-    const res = await app.request('/api/v1/items/9999');
-    assert.strictEqual(res.status, 404);
-
-    const body = await res.json() as { success: boolean; error: string };
-    assert.strictEqual(body.success, false);
-    assert.ok(body.error.includes('not found'));
-  });
-
-  it('GET /non-existent should return 404 Not Found', async () => {
-    const res = await app.request('/non-existent');
-    assert.strictEqual(res.status, 404);
+    const res = await app.request('/ui');
+    expect(res.headers.get('Content-Type')).toContain('text/html');
+    const html = await res.text();
+    expect(html.startsWith('<!DOCTYPE html><html lang="en">')).toBe(true);
+    expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
+    expect(html).not.toContain('<script>alert(1)</script>');
   });
 });

@@ -1,20 +1,14 @@
 import { Hono } from 'hono';
-import type { HealthStatus } from '../types.js';
 
-export const healthRouter = new Hono();
+// Set on the first request, not at import time: some runtimes freeze the clock
+// while a module is being initialised, and import time is not "server start" there.
+let startedAt: number | undefined;
 
-healthRouter.get('/', (c) => {
-  const mem = process.memoryUsage();
-  const status: HealthStatus = {
-    status: 'healthy',
-    uptimeSeconds: Math.round(process.uptime()),
-    memoryUsageMb: Math.round(mem.heapUsed / 1024 / 1024),
-    environment: process.env.NODE_ENV || 'development',
-    timestamp: new Date().toISOString()
-  };
-
+// Portable on purpose: no process.* calls, so it also runs on Workers and Deno.
+export const health = new Hono().get('/', (c) => {
+  startedAt ??= Date.now();
   return c.json({
-    success: true,
-    data: status
+    status: 'ok' as const,
+    uptimeSeconds: Math.round((Date.now() - startedAt) / 1000),
   });
 });

@@ -1,64 +1,62 @@
 import { Hono } from 'hono';
-import { cors } from 'hono/cors';
+import { HTTPException } from 'hono/http-exception';
 import { logger } from 'hono/logger';
+import { requestId } from 'hono/request-id';
 import { secureHeaders } from 'hono/secure-headers';
-import { timing } from 'hono/timing';
-import { healthRouter } from './routes/health.js';
-import { itemsRouter } from './routes/items.js';
+import type { AppEnv } from './env.js';
+import { InMemoryItemRepository, seedItems } from './repository.js';
+import { health } from './routes/health.js';
+import { createItemRoutes } from './routes/items.js';
+import { pages } from './routes/pages.js';
+import type { ItemRepository } from './types.js';
 
-export const app = new Hono();
+export interface AppOptions {
+  /** Storage to use. Tests pass a fresh one per case. */
+  items?: ItemRepository;
+  /** When set, POST, PATCH and DELETE require this key. */
+  apiKey?: string | undefined;
+  /** Print one access-log line per request. */
+  log?: boolean;
+}
 
-// Global Middleware Stack
-app.use('*', logger());
-app.use('*', timing());
-app.use('*', secureHeaders());
-app.use(
-  '*',
-  cors({
-    origin: '*',
-    allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowHeaders: ['Content-Type', 'Authorization', 'X-API-Key']
-  })
-);
+export function createApp(options: AppOptions = {}) {
+  const items = options.items ?? new InMemoryItemRepository(seedItems());
+  const app = new Hono<AppEnv>();
 
-// Root landing route
-app.get('/', (c) => {
-  return c.json({
-    name: 'Learn Hono Edge Web Framework API',
-    version: '1.0.0',
-    documentation: 'https://github.com/TheLearningHubOrg/learn-hono',
-    endpoints: {
-      health: '/health',
-      items: '/api/v1/items'
-    }
+  // Global middleware runs in registration order on the way in, reverse order on the way out.
+  if (options.log) app.use(logger());
+  app.use(requestId());
+  app.use(secureHeaders());
+  app.use(async (c, next) => {
+    c.set('items', items);
+    await next();
   });
-});
 
-// Mounted Routers
-app.route('/health', healthRouter);
-app.route('/api/v1/items', itemsRouter);
-
-// 404 Handler
-app.notFound((c) => {
-  return c.json(
-    {
-      success: false,
-      error: `Not Found: Cannot ${c.req.method} ${c.req.path}`
-    },
-    404
+  app.notFound((c) =>
+    c.json({ error: { code: 'NOT_FOUND', message: `No route for ${c.req.method} ${c.req.path}` } }, 404),
   );
-});
 
-// Global Error Handler
-app.onError((err, c) => {
-  console.error('[Hono Error]', err);
-  return c.json(
-    {
-      success: false,
-      error: err.message || 'Internal Server Error'
-    },
-    500
-  );
-});
+  app.onError((err, c) => {
+    if (err instanceof HTTPException) {
+      if (err.res) return err.getResponse();
+      return c.json({ error: { code: `HTTP_${err.status}`, message: err.message } }, err.status);
+    }
+    console.error(`[${c.var.requestId}]`, err);
+    return c.json({ error: { code: 'INTERNAL', message: 'Internal Server Error' } }, 500);
+  });
 
-export type AppType = typeof app;
+  // The value of this chain is what AppType describes.
+  return app
+    .get('/', (c) =>
+      c.json({
+        name: 'learn-hono',
+        docs: 'https://github.com/TheLearningHubOrg/learn-hono',
+        endpoints: { health: '/health', items: '/api/v1/items', ui: '/ui' },
+      }),
+    )
+    .route('/health', health)
+    .route('/api/v1/items', createItemRoutes({ apiKey: options.apiKey }))
+    .route('/ui', pages);
+}
+
+export type AppType = ReturnType<typeof createApp>;

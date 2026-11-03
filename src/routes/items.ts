@@ -1,107 +1,42 @@
 import { Hono } from 'hono';
-import { zValidator } from '@hono/zod-validator';
-import { z } from 'zod';
-import type { Item } from '../types.js';
+import { HTTPException } from 'hono/http-exception';
+import type { AppEnv } from '../env.js';
+import { requireApiKey } from '../middleware/auth.js';
+import { validate } from '../middleware/validate.js';
+import { createItemSchema, listQuerySchema, updateItemSchema } from '../schemas.js';
 
-export const itemsRouter = new Hono();
+const notFound = (id: string) => new HTTPException(404, { message: `Item ${id} not found` });
 
-// In-memory data store for demonstration
-const itemsStore: Map<string, Item> = new Map([
-  [
-    '1',
-    {
-      id: '1',
-      title: 'Master Hono RegexpRouter',
-      description: 'Understand linear radix tree vs compiled regex routing at the edge',
-      status: 'completed',
-      createdAt: new Date().toISOString()
-    }
-  ],
-  [
-    '2',
-    {
-      id: '2',
-      title: 'Implement RPC Typesafe Client',
-      description: 'Export AppType for zero-overhead end-to-end type inference',
-      status: 'in_progress',
-      createdAt: new Date().toISOString()
-    }
-  ]
-]);
+export function createItemRoutes({ apiKey }: { apiKey?: string | undefined } = {}) {
+  const writeGuard = requireApiKey(apiKey);
 
-const createItemSchema = z.object({
-  title: z.string().min(2).max(100),
-  description: z.string().max(500).default(''),
-  status: z.enum(['pending', 'in_progress', 'completed']).default('pending')
-});
-
-const updateItemSchema = createItemSchema.partial();
-
-// GET all items
-itemsRouter.get('/', (c) => {
-  const items = Array.from(itemsStore.values());
-  return c.json({
-    success: true,
-    data: items,
-    meta: { total: items.length }
-  });
-});
-
-// GET item by id
-itemsRouter.get('/:id', (c) => {
-  const id = c.req.param('id');
-  const item = itemsStore.get(id);
-
-  if (!item) {
-    return c.json({ success: false, error: `Item with id ${id} not found` }, 404);
-  }
-
-  return c.json({ success: true, data: item });
-});
-
-// POST create item
-itemsRouter.post('/', zValidator('json', createItemSchema), (c) => {
-  const data = c.req.valid('json');
-  const id = String(itemsStore.size + 1);
-
-  const newItem: Item = {
-    id,
-    title: data.title,
-    description: data.description,
-    status: data.status,
-    createdAt: new Date().toISOString()
-  };
-
-  itemsStore.set(id, newItem);
-  return c.json({ success: true, data: newItem }, 201);
-});
-
-// PATCH update item
-itemsRouter.patch('/:id', zValidator('json', updateItemSchema), (c) => {
-  const id = c.req.param('id');
-  const existing = itemsStore.get(id);
-
-  if (!existing) {
-    return c.json({ success: false, error: `Item with id ${id} not found` }, 404);
-  }
-
-  const updates = c.req.valid('json');
-  const updatedItem: Item = {
-    ...existing,
-    ...updates
-  };
-
-  itemsStore.set(id, updatedItem);
-  return c.json({ success: true, data: updatedItem });
-});
-
-// DELETE remove item
-itemsRouter.delete('/:id', (c) => {
-  const id = c.req.param('id');
-  if (!itemsStore.has(id)) {
-    return c.json({ success: false, error: `Item with id ${id} not found` }, 404);
-  }
-
-  itemsStore.delete(id);
-  return c.json({ success: true, data: { deletedId: id } });
-});
+  // Chained calls keep every route in the inferred type, which the RPC client needs.
+  return new Hono<AppEnv>()
+    .get('/', validate('query', listQuerySchema), (c) => {
+      const filter = c.req.valid('query');
+      const data = c.var.items.list(filter);
+      return c.json({ data, meta: { count: data.length } }, 200);
+    })
+    .get('/:id', (c) => {
+      const id = c.req.param('id');
+      const item = c.var.items.get(id);
+      if (!item) throw notFound(id);
+      return c.json({ data: item }, 200);
+    })
+    .post('/', writeGuard, validate('json', createItemSchema), (c) => {
+      const item = c.var.items.create(c.req.valid('json'));
+      c.header('Location', `/api/v1/items/${item.id}`);
+      return c.json({ data: item }, 201);
+    })
+    .patch('/:id', writeGuard, validate('json', updateItemSchema), (c) => {
+      const id = c.req.param('id');
+      const item = c.var.items.update(id, c.req.valid('json'));
+      if (!item) throw notFound(id);
+      return c.json({ data: item }, 200);
+    })
+    .delete('/:id', writeGuard, (c) => {
+      const id = c.req.param('id');
+      if (!c.var.items.delete(id)) throw notFound(id);
+      return c.body(null, 204);
+    });
+}
